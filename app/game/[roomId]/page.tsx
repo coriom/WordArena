@@ -1,15 +1,14 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useParams, useRouter, useSearchParams } from "next/navigation";
+import { useParams, useRouter } from "next/navigation";
 import Pusher from "pusher-js";
 
-type Member = { id: string; name: string };
-
-type RoomSettings = {
-    durationSec: number;
-    theme: string;
-};
+function formatTime(totalSeconds: number) {
+    const m = Math.floor(totalSeconds / 60);
+    const s = totalSeconds % 60;
+    return `${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+}
 
 type StartPayload = {
     startAt: number;
@@ -17,48 +16,61 @@ type StartPayload = {
     theme: string;
 };
 
-export default function RoomPage() {
+export default function GamePage() {
     const router = useRouter();
     const params = useParams<{ roomId: string }>();
-    const search = useSearchParams();
-
     const roomId = params.roomId;
-    const isHost = search.get("host") === "1"; // MVP (trust-based)
 
-    const [name, setName] = useState("Player");
     const [joined, setJoined] = useState(false);
-    const [members, setMembers] = useState<Member[]>([]);
-    const [status, setStatus] = useState<string>("");
 
-    // Settings host
-    const [minutes, setMinutes] = useState<number>(5);
-    const [seconds, setSeconds] = useState<number>(0);
-    const [theme, setTheme] = useState<string>("Thème libre");
-
-    // Settings view (sync)
-    const [roomSettings, setRoomSettings] = useState<RoomSettings>({
-        durationSec: 300,
-        theme: "Thème libre",
-    });
+    const [theme, setTheme] = useState("Thème libre");
+    const [secondsLeft, setSecondsLeft] = useState<number>(0);
+    const [locked, setLocked] = useState(false);
+    const [text, setText] = useState("");
 
     const pusherRef = useRef<Pusher | null>(null);
     const channelRef = useRef<any>(null);
+    const tickRef = useRef<number | null>(null);
 
-    // évite double navigation / double start
     const startedRef = useRef(false);
 
     const channelName = useMemo(() => `presence-room-${roomId}`, [roomId]);
 
-    const clamp = (v: number, min: number, max: number) => Math.min(max, Math.max(min, v));
+    const clearTick = () => {
+        if (tickRef.current) window.clearInterval(tickRef.current);
+        tickRef.current = null;
+    };
 
-    const durationSec = useMemo(() => {
-        const m = clamp(Number(minutes) || 0, 0, 240);
-        const s = clamp(Number(seconds) || 0, 0, 59);
-        return m * 60 + s;
-    }, [minutes, seconds]);
+    const startTimerFromPayload = (payload: StartPayload) => {
+        if (startedRef.current) return;
+        startedRef.current = true;
 
-    const disconnectPusher = () => {
+        setTheme(payload.theme || "Thème libre");
+        setLocked(false);
+
+        const startAt = payload.startAt;
+        const duration = payload.durationSec;
+
+        const tick = () => {
+            const now = Date.now();
+            const elapsed = Math.max(0, Math.floor((now - startAt) / 1000));
+            const left = Math.max(0, duration - elapsed);
+            setSecondsLeft(left);
+
+            if (left <= 0) {
+                setLocked(true);
+                clearTick();
+            }
+        };
+
+        tick();
+        clearTick();
+        tickRef.current = window.setInterval(tick, 250);
+    };
+
+    const disconnect = () => {
         try {
+            clearTick();
             if (channelRef.current) channelRef.current.unbind_all();
             if (pusherRef.current) pusherRef.current.disconnect();
         } catch {
@@ -68,125 +80,67 @@ export default function RoomPage() {
         }
     };
 
-    useEffect(() => {
-        return () => disconnectPusher();
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, []);
-
-    const goHome = () => {
-        disconnectPusher();
-        router.push("/");
-    };
-
     const join = () => {
         if (joined) return;
 
         const key = process.env.NEXT_PUBLIC_PUSHER_KEY;
         const cluster = process.env.NEXT_PUBLIC_PUSHER_CLUSTER;
 
-        if (!key || !cluster) {
-            setStatus("Env vars manquantes: NEXT_PUBLIC_PUSHER_KEY / NEXT_PUBLIC_PUSHER_CLUSTER ❌");
-            return;
-        }
-
-        setStatus("Connexion...");
+        if (!key || !cluster) return;
 
         const pusher = new Pusher(key, {
             cluster,
             authEndpoint: "/api/pusher/auth",
-            auth: { params: { name } },
+            // Pas besoin du pseudo ici (on fera mieux ensuite en le passant depuis le lobby)
         });
 
         const channel = pusher.subscribe(channelName);
 
-        channel.bind("pusher:subscription_succeeded", () => {
-            // Presence members: channel.members.members = { [id]: user_info }
-            const membersObj = (channel as any).members?.members ?? {};
-            const list: Member[] = Object.entries(membersObj).map(([id, info]: any) => {
-                return { id, name: info?.name ?? "Player" };
-            });
-
-            setMembers(list);
-            setJoined(true);
-            setStatus("Connecté ✅");
-        });
-
-        channel.bind("pusher:member_added", (member: any) => {
-            setMembers((prev) => {
-                if (prev.some((m) => m.id === member.id)) return prev;
-                return [...prev, { id: member.id, name: member.info?.name ?? "Player" }];
-            });
-        });
-
-        channel.bind("pusher:member_removed", (member: any) => {
-            setMembers((prev) => prev.filter((m) => m.id !== member.id));
-        });
-
-        // Host -> others : settings
-        channel.bind("client-room-settings", (payload: RoomSettings) => {
-            setRoomSettings(payload);
-        });
-
-        // Host -> all : start game (navigation UNIQUEMENT ici)
         channel.bind("client-start-game", (payload: StartPayload) => {
-            if (startedRef.current) return;
-            startedRef.current = true;
-
-            // On stocke pour la page /game (timer démarre direct)
             sessionStorage.setItem(`wordarena_start_${roomId}`, JSON.stringify(payload));
-
-            router.push(`/game/${roomId}`);
+            startedRef.current = false;
+            startTimerFromPayload(payload);
         });
 
-        channel.bind("pusher:subscription_error", () => {
-            setStatus("Erreur de connexion (auth / clés ?) ❌");
+        channel.bind("pusher:subscription_succeeded", () => {
+            setJoined(true);
         });
 
         pusherRef.current = pusher;
         channelRef.current = channel;
     };
 
-    const pushSettings = () => {
-        if (!isHost || !channelRef.current) return;
+    useEffect(() => {
+        // Auto-join dès l'arrivée sur /game
+        join();
 
-        const payload: RoomSettings = {
-            durationSec,
-            theme: theme.trim() || "Thème libre",
-        };
+        // Si le lobby a stocké le start payload, on démarre direct
+        const raw = sessionStorage.getItem(`wordarena_start_${roomId}`);
+        if (raw) {
+            try {
+                const payload = JSON.parse(raw) as StartPayload;
+                startTimerFromPayload(payload);
+            } catch {
+            }
+        }
 
-        setRoomSettings(payload);
-        channelRef.current.trigger("client-room-settings", payload);
+        return () => disconnect();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+
+    const goHome = () => {
+        disconnect();
+        router.push("/");
     };
-
-    const startGame = () => {
-        if (!isHost || !channelRef.current) return;
-
-        // IMPORTANT: ne pas router.push ici
-        const payload: StartPayload = {
-            startAt: Date.now() + 3000,
-            durationSec: roomSettings.durationSec,
-            theme: roomSettings.theme,
-        };
-
-        // reset guard au cas où
-        startedRef.current = false;
-
-        channelRef.current.trigger("client-start-game", payload);
-        // navigation via l'event reçu
-    };
-
-    const effectiveSettings = isHost ? { durationSec, theme } : roomSettings;
 
     return (
         <main className="min-h-screen p-6">
-            <div className="mx-auto max-w-2xl space-y-4">
+            <div className="mx-auto max-w-3xl space-y-4">
                 <div className="flex items-start justify-between gap-3">
                     <div>
-                        <h1 className="text-3xl font-bold">
-                            Room: {roomId} {isHost ? <span className="text-sm">(MJ)</span> : null}
-                        </h1>
+                        <h1 className="text-3xl font-bold">Game: {roomId}</h1>
                         <p className="text-sm text-gray-600">
-                            Code: <span className="font-mono">{roomId}</span>
+                            Timer + thème sont définis par le MJ. Ton texte reste privé.
                         </p>
                     </div>
 
@@ -196,106 +150,35 @@ export default function RoomPage() {
                 </div>
 
                 {!joined ? (
-                    <div className="space-y-3 rounded-xl border p-4">
-                        <label className="block text-sm text-gray-700">Pseudo</label>
-                        <input
-                            className="w-full rounded border px-3 py-2"
-                            value={name}
-                            onChange={(e) => setName(e.target.value)}
-                        />
-
-                        <button onClick={join} className="rounded bg-black px-3 py-2 text-white">
-                            Rejoindre le lobby
-                        </button>
-
-                        {status && <p className="text-sm text-gray-600">{status}</p>}
+                    <div className="rounded-xl border p-4 text-sm text-gray-600">
+                        Connexion à la partie…
                     </div>
                 ) : (
                     <>
-                        <div className="rounded-xl border p-4 space-y-3">
-                            <div className="flex items-center justify-between">
-                                <div className="font-semibold">Paramètres</div>
+                        <div className="rounded-xl border p-4 flex items-center justify-between">
+                            <div className="text-4xl font-mono">{formatTime(secondsLeft)}</div>
+                            <div className="text-right">
+                                <div className="text-sm text-gray-500">Thème</div>
+                                <div className="font-semibold">{theme}</div>
+                            </div>
+                        </div>
+
+                        <textarea
+                            className="h-[55vh] w-full resize-none rounded-xl border p-4 text-base leading-relaxed"
+                            placeholder="Écris ici..."
+                            value={text}
+                            onChange={(e) => setText(e.target.value)}
+                            disabled={locked}
+                        />
+
+                        {locked && (
+                            <div className="rounded-xl border p-4">
+                                <div className="font-semibold">Temps écoulé ✅</div>
                                 <div className="text-sm text-gray-600">
-                                    Durée: <span className="font-mono">{effectiveSettings.durationSec}s</span> — Thème:{" "}
-                                    <span className="font-mono">{effectiveSettings.theme || "Thème libre"}</span>
+                                    (MVP) Ton texte est verrouillé. Prochaine étape : envoyer les textes au MJ puis afficher les résultats à tous.
                                 </div>
                             </div>
-
-                            {isHost ? (
-                                <>
-                                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 items-end">
-                                        <div>
-                                            <label className="block text-sm text-gray-700">Minutes</label>
-                                            <input
-                                                type="number"
-                                                min={0}
-                                                max={240}
-                                                className="w-full rounded border px-3 py-2"
-                                                value={minutes}
-                                                onChange={(e) => setMinutes(Number(e.target.value))}
-                                            />
-                                        </div>
-
-                                        <div>
-                                            <label className="block text-sm text-gray-700">Secondes</label>
-                                            <input
-                                                type="number"
-                                                min={0}
-                                                max={59}
-                                                className="w-full rounded border px-3 py-2"
-                                                value={seconds}
-                                                onChange={(e) => setSeconds(Number(e.target.value))}
-                                            />
-                                        </div>
-
-                                        <div className="text-sm text-gray-600">
-                                            Total: <span className="font-mono">{durationSec}s</span>
-                                        </div>
-                                    </div>
-
-                                    <div>
-                                        <label className="block text-sm text-gray-700">Thème</label>
-                                        <input
-                                            className="w-full rounded border px-3 py-2"
-                                            value={theme}
-                                            onChange={(e) => setTheme(e.target.value)}
-                                        />
-                                    </div>
-
-                                    <div className="flex gap-2">
-                                        <button onClick={pushSettings} className="rounded border px-3 py-2">
-                                            Appliquer / Sync
-                                        </button>
-
-                                        <button
-                                            onClick={startGame}
-                                            className="rounded bg-black px-3 py-2 text-white"
-                                        >
-                                            Start (MJ)
-                                        </button>
-                                    </div>
-                                </>
-                            ) : (
-                                <p className="text-sm text-gray-600">
-                                    En attente du MJ… (seul le MJ peut lancer).
-                                </p>
-                            )}
-                        </div>
-
-                        <div className="rounded-xl border p-4">
-                            <div className="flex items-center justify-between">
-                                <div className="font-semibold">Joueurs dans la room</div>
-                                <div className="text-sm text-gray-600">{members.length}</div>
-                            </div>
-
-                            <ul className="mt-3 space-y-2">
-                                {members.map((m) => (
-                                    <li key={m.id} className="rounded border px-3 py-2">
-                                        {m.name}
-                                    </li>
-                                ))}
-                            </ul>
-                        </div>
+                        )}
                     </>
                 )}
             </div>

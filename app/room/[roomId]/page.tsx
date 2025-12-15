@@ -67,6 +67,11 @@ export default function RoomPage() {
         }
     };
 
+    useEffect(() => {
+        return () => disconnectPusher();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+
     const goHome = () => {
         disconnectPusher();
         router.push("/");
@@ -91,7 +96,6 @@ export default function RoomPage() {
             auth: { params: { name } },
         });
 
-        // Logs utiles si problème réseau/auth
         pusher.connection.bind("error", (err: any) => {
             console.log("Pusher connection error:", err);
             setStatus("Erreur Pusher (voir console) ❌");
@@ -100,7 +104,6 @@ export default function RoomPage() {
         const channel = pusher.subscribe(channelName);
 
         channel.bind("pusher:subscription_succeeded", () => {
-            // Presence members: channel.members.members = { [id]: user_info }
             const membersObj = (channel as any).members?.members ?? {};
             const list: Member[] = Object.entries(membersObj).map(([id, info]: any) => {
                 return { id, name: info?.name ?? "Player" };
@@ -122,12 +125,10 @@ export default function RoomPage() {
             setMembers((prev) => prev.filter((m) => m.id !== member.id));
         });
 
-        // Host -> others : settings
         channel.bind("client-room-settings", (payload: RoomSettings) => {
             setRoomSettings(payload);
         });
 
-        // Host -> all : start game
         channel.bind("client-start-game", (payload: StartPayload) => {
             if (startedRef.current) return;
             startedRef.current = true;
@@ -141,7 +142,6 @@ export default function RoomPage() {
             setStatus("Erreur de connexion ❌");
         });
 
-        // Timeout UX si ça reste bloqué
         window.setTimeout(() => {
             if (!joined) setStatus("Toujours en attente… (auth Pusher ?) ❌");
         }, 4000);
@@ -149,11 +149,6 @@ export default function RoomPage() {
         pusherRef.current = pusher;
         channelRef.current = channel;
     };
-
-    useEffect(() => {
-        return () => disconnectPusher();
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, []);
 
     const pushSettings = () => {
         if (!isHost || !channelRef.current) return;
@@ -170,13 +165,13 @@ export default function RoomPage() {
     const startGame = () => {
         if (!isHost || !channelRef.current) return;
 
-        const payload = {
+        const payload: StartPayload = {
             startAt: Date.now() + 3000,
             durationSec: roomSettings.durationSec,
             theme: roomSettings.theme,
         };
 
-        // Stockage local pour le MJ
+        // Stockage local pour le MJ (utile pour /game)
         sessionStorage.setItem(`wordarena_start_${roomId}`, JSON.stringify(payload));
 
         // Envoi aux autres joueurs
@@ -185,7 +180,6 @@ export default function RoomPage() {
         // Navigation immédiate POUR LE MJ
         router.push(`/game/${roomId}`);
     };
-
 
     const effectiveSettings = isHost ? { durationSec, theme } : roomSettings;
 
@@ -226,7 +220,7 @@ export default function RoomPage() {
                     <>
                         <div className="rounded-xl border p-4 space-y-3">
                             <div className="flex items-center justify-between">
-                                <div className="font-semibold">Paramètres de partie</div>
+                                <div className="font-semibold">Paramètres</div>
                                 <div className="text-sm text-gray-600">
                                     Durée: <span className="font-mono">{effectiveSettings.durationSec}s</span> — Thème:{" "}
                                     <span className="font-mono">{effectiveSettings.theme || "Thème libre"}</span>
