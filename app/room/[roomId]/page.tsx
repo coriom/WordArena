@@ -170,16 +170,22 @@ export default function RoomPage() {
     const startGame = () => {
         if (!isHost || !channelRef.current) return;
 
-        const payload: StartPayload = {
+        const payload = {
             startAt: Date.now() + 3000,
             durationSec: roomSettings.durationSec,
             theme: roomSettings.theme,
         };
 
-        // IMPORTANT : pas de router.push ici (sinon double nav)
-        startedRef.current = false;
+        // Stockage local pour le MJ
+        sessionStorage.setItem(`wordarena_start_${roomId}`, JSON.stringify(payload));
+
+        // Envoi aux autres joueurs
         channelRef.current.trigger("client-start-game", payload);
+
+        // Navigation immédiate POUR LE MJ
+        router.push(`/game/${roomId}`);
     };
+
 
     const effectiveSettings = isHost ? { durationSec, theme } : roomSettings;
 
