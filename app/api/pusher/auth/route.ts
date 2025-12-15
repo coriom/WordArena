@@ -10,11 +10,33 @@ const pusher = new Pusher({
 });
 
 export async function POST(req: Request) {
-    const formData = await req.formData();
-    const socket_id = String(formData.get("socket_id"));
-    const channel_name = String(formData.get("channel_name"));
+    const contentType = req.headers.get("content-type") || "";
 
-    const name = String(formData.get("name") ?? "Player");
+    let socket_id = "";
+    let channel_name = "";
+    let name = "Player";
+
+    // Pusher envoie souvent du x-www-form-urlencoded
+    if (contentType.includes("application/x-www-form-urlencoded")) {
+        const body = await req.text();
+        const params = new URLSearchParams(body);
+        socket_id = params.get("socket_id") ?? "";
+        channel_name = params.get("channel_name") ?? "";
+        name = params.get("name") ?? "Player";
+    } else {
+        // fallback
+        const formData = await req.formData();
+        socket_id = String(formData.get("socket_id") ?? "");
+        channel_name = String(formData.get("channel_name") ?? "");
+        name = String(formData.get("name") ?? "Player");
+    }
+
+    if (!socket_id || !channel_name) {
+        return NextResponse.json(
+            { error: "Missing socket_id or channel_name" },
+            { status: 400 }
+        );
+    }
 
     const presenceData = {
         user_id: socket_id,

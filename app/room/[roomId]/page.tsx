@@ -11,6 +11,12 @@ type RoomSettings = {
     theme: string;
 };
 
+type StartPayload = {
+    startAt: number;
+    durationSec: number;
+    theme: string;
+};
+
 export default function RoomPage() {
     const router = useRouter();
     const params = useParams<{ roomId: string }>();
@@ -37,6 +43,9 @@ export default function RoomPage() {
 
     const pusherRef = useRef<Pusher | null>(null);
     const channelRef = useRef<any>(null);
+
+    // évite double navigation
+    const startedRef = useRef(false);
 
     const channelName = useMemo(() => `presence-room-${roomId}`, [roomId]);
 
@@ -66,25 +75,47 @@ export default function RoomPage() {
     const join = () => {
         if (joined) return;
 
+        const key = process.env.NEXT_PUBLIC_PUSHER_KEY;
+        const cluster = process.env.NEXT_PUBLIC_PUSHER_CLUSTER;
+
+        if (!key || !cluster) {
+            setStatus("Env vars manquantes: NEXT_PUBLIC_PUSHER_KEY / NEXT_PUBLIC_PUSHER_CLUSTER ❌");
+            return;
+        }
+
         setStatus("Connexion...");
-        const pusher = new Pusher(process.env.NEXT_PUBLIC_PUSHER_KEY!, {
-            cluster: process.env.NEXT_PUBLIC_PUSHER_CLUSTER!,
+
+        const pusher = new Pusher(key, {
+            cluster,
             authEndpoint: "/api/pusher/auth",
             auth: { params: { name } },
         });
 
+        // Logs utiles si problème réseau/auth
+        pusher.connection.bind("error", (err: any) => {
+            console.log("Pusher connection error:", err);
+            setStatus("Erreur Pusher (voir console) ❌");
+        });
+
         const channel = pusher.subscribe(channelName);
 
-        channel.bind("pusher:subscription_succeeded", (data: any) => {
-            const list: Member[] = [];
-            data.members.each((m: any) => list.push({ id: m.id, name: m.info?.name ?? "Player" }));
+        channel.bind("pusher:subscription_succeeded", () => {
+            // Presence members: channel.members.members = { [id]: user_info }
+            const membersObj = (channel as any).members?.members ?? {};
+            const list: Member[] = Object.entries(membersObj).map(([id, info]: any) => {
+                return { id, name: info?.name ?? "Player" };
+            });
+
             setMembers(list);
             setJoined(true);
             setStatus("Connecté ✅");
         });
 
         channel.bind("pusher:member_added", (member: any) => {
-            setMembers((prev) => [...prev, { id: member.id, name: member.info?.name ?? "Player" }]);
+            setMembers((prev) => {
+                if (prev.some((m) => m.id === member.id)) return prev;
+                return [...prev, { id: member.id, name: member.info?.name ?? "Player" }];
+            });
         });
 
         channel.bind("pusher:member_removed", (member: any) => {
@@ -97,18 +128,28 @@ export default function RoomPage() {
         });
 
         // Host -> all : start game
-        channel.bind("client-start-game", (payload: { startAt: number; durationSec: number; theme: string }) => {
-            // on passe à la page game (tout le monde)
+        channel.bind("client-start-game", (payload: StartPayload) => {
+            if (startedRef.current) return;
+            startedRef.current = true;
+
+            sessionStorage.setItem(`wordarena_start_${roomId}`, JSON.stringify(payload));
             router.push(`/game/${roomId}`);
         });
 
-        channel.bind("pusher:subscription_error", () => setStatus("Erreur de connexion ❌"));
+        channel.bind("pusher:subscription_error", (err: any) => {
+            console.log("subscription_error:", err);
+            setStatus("Erreur de connexion ❌");
+        });
+
+        // Timeout UX si ça reste bloqué
+        window.setTimeout(() => {
+            if (!joined) setStatus("Toujours en attente… (auth Pusher ?) ❌");
+        }, 4000);
 
         pusherRef.current = pusher;
         channelRef.current = channel;
     };
 
-    // Auto-join direct si tu veux (optionnel). Je laisse manuel avec bouton.
     useEffect(() => {
         return () => disconnectPusher();
         // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -116,7 +157,12 @@ export default function RoomPage() {
 
     const pushSettings = () => {
         if (!isHost || !channelRef.current) return;
-        const payload: RoomSettings = { durationSec, theme: theme.trim() || "Thème libre" };
+
+        const payload: RoomSettings = {
+            durationSec,
+            theme: theme.trim() || "Thème libre",
+        };
+
         setRoomSettings(payload);
         channelRef.current.trigger("client-room-settings", payload);
     };
@@ -124,15 +170,15 @@ export default function RoomPage() {
     const startGame = () => {
         if (!isHost || !channelRef.current) return;
 
-        const payload = {
-            // on démarre dans 3s pour sync
+        const payload: StartPayload = {
             startAt: Date.now() + 3000,
             durationSec: roomSettings.durationSec,
             theme: roomSettings.theme,
         };
 
+        // IMPORTANT : pas de router.push ici (sinon double nav)
+        startedRef.current = false;
         channelRef.current.trigger("client-start-game", payload);
-        router.push(`/game/${roomId}`);
     };
 
     const effectiveSettings = isHost ? { durationSec, theme } : roomSettings;
@@ -177,7 +223,7 @@ export default function RoomPage() {
                                 <div className="font-semibold">Paramètres de partie</div>
                                 <div className="text-sm text-gray-600">
                                     Durée: <span className="font-mono">{effectiveSettings.durationSec}s</span> — Thème:{" "}
-                                    <span className="font-mono">{(effectiveSettings.theme || "Thème libre")}</span>
+                                    <span className="font-mono">{effectiveSettings.theme || "Thème libre"}</span>
                                 </div>
                             </div>
 
@@ -227,10 +273,7 @@ export default function RoomPage() {
                                             Appliquer / Sync
                                         </button>
 
-                                        <button
-                                            onClick={startGame}
-                                            className="rounded bg-black px-3 py-2 text-white"
-                                        >
+                                        <button onClick={startGame} className="rounded bg-black px-3 py-2 text-white">
                                             Start (MJ)
                                         </button>
                                     </div>
