@@ -68,7 +68,10 @@ export default function RoomPage() {
     };
 
     useEffect(() => {
-        return () => disconnectPusher();
+        return () => {
+            // IMPORTANT: ne coupe pas la connexion instantanément si on vient de trigger un event
+            window.setTimeout(() => disconnectPusher(), 500);
+        };
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
@@ -177,8 +180,10 @@ export default function RoomPage() {
         // Envoi aux autres joueurs
         channelRef.current.trigger("client-start-game", payload);
 
-        // Navigation immédiate POUR LE MJ
-        router.push(`/game/${roomId}`);
+        // IMPORTANT: attendre un tout petit peu pour laisser l'event partir
+        window.setTimeout(() => {
+            router.push(`/game/${roomId}`);
+        }, 200);
     };
 
     const effectiveSettings = isHost ? { durationSec, theme } : roomSettings;
